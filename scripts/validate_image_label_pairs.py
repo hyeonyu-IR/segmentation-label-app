@@ -22,6 +22,11 @@ def _key_from_name(path: Path, image_prefix: str, label_prefix: str) -> str:
     for pfx in (image_prefix, label_prefix):
         if pfx and name.startswith(pfx):
             name = name[len(pfx) :]
+    # Normalize common streamlit export suffixes so image/label keys match.
+    for sfx in ("-label-volume", "_label_volume", "-image", "_image", "-label", "_label"):
+        if name.endswith(sfx):
+            name = name[: -len(sfx)]
+            break
     # Common cleanup for exported names from the Streamlit app
     name = name.replace("image_slice_", "")
     name = name.replace("image_slice", "")

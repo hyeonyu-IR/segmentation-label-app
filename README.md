@@ -59,14 +59,13 @@ Alternative (if you `cd segmentation-label-app` first):
 - `label_map_volume_00001.nii.gz`, ... (full 3D label volume with your annotated slice at selected Z)
 
 For `NIfTI volume (.nii.gz)` input, the app auto-assigns a case ID:
-- `L3-seg-00001`, `L3-seg-00002`, ...
-- Counter is persistent across app restarts.
-- Counter file: `segmentation-label-app/data/case_counter.json`
+- Timestamp-based format: `L3-seg-YYYYMMDD-HHMMSS`
+- Example: `L3-seg-20260211-113600`
 
 Download names for that case:
-- `L3-seg-00001-image.nii.gz`
-- `L3-seg-00001-label.nii.gz`
-- `L3-seg-00001-label-volume.nii.gz` (optional 3D export)
+- `L3-seg-20260211-113600-image.nii.gz`
+- `L3-seg-20260211-113600-label.nii.gz`
+- `L3-seg-20260211-113600-label-volume.nii.gz` (optional 3D export)
 
 Area logging:
 - Click `Finalize case: save CSV + download pair ZIP` in `Downloads`.

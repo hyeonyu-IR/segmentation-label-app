@@ -1,7 +1,6 @@
 import io
 import os
 import hashlib
-import json
 import csv
 import zipfile
 from pathlib import Path
@@ -26,25 +25,18 @@ from utils_ascii import (
 from infer_ascii import predict_mask
 
 
-COUNTER_FILE = Path(__file__).resolve().parents[1] / "data" / "case_counter.json"
 AREA_LOG_FILE = Path(__file__).resolve().parents[1] / "data" / "area_log.csv"
 
 
-def load_persistent_counter():
-    try:
-        if COUNTER_FILE.exists():
-            data = json.loads(COUNTER_FILE.read_text(encoding="utf-8"))
-            val = int(data.get("next_case_index", 1))
-            return max(1, val)
-    except Exception:
-        pass
-    return 1
+def make_case_name():
+    return datetime.now().strftime("L3-seg-%Y%m%d-%H%M%S")
 
 
-def save_persistent_counter(next_index):
-    COUNTER_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"next_case_index": int(next_index)}
-    COUNTER_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+def get_or_create_case_name(source_key):
+    if st.session_state.get("current_source_key") != source_key:
+        st.session_state["current_source_key"] = source_key
+        st.session_state["current_case_name"] = make_case_name()
+    return st.session_state.get("current_case_name", make_case_name())
 
 
 def append_area_log_row(row_dict):
@@ -193,24 +185,19 @@ if uploaded is not None:
     volume_data = None
     volume_affine = None
     volume_slice_idx = None
-    case_name = "L3-seg-manual"
+    case_name = make_case_name()
     source_file_name = uploaded.name
 
     if input_type == "DICOM slice":
         dicom_path = io.BytesIO(bytes_data)
         image_hu, spacing, ds = load_dicom(dicom_path)
+        source_key = f"DICOM::{hashlib.sha1(bytes_data).hexdigest()[:16]}"
+        case_name = get_or_create_case_name(source_key)
         source_id = f"DICOM::{uploaded.name}"
     else:
         volume_key = hashlib.sha1(bytes_data).hexdigest()[:16]
-        if "persistent_next_case_idx" not in st.session_state:
-            st.session_state["persistent_next_case_idx"] = load_persistent_counter()
-        if st.session_state.get("current_volume_key") != volume_key:
-            case_idx = int(st.session_state["persistent_next_case_idx"])
-            st.session_state["current_volume_key"] = volume_key
-            st.session_state["current_case_name"] = f"L3-seg-{case_idx:05d}"
-            st.session_state["persistent_next_case_idx"] = case_idx + 1
-            save_persistent_counter(st.session_state["persistent_next_case_idx"])
-        case_name = st.session_state.get("current_case_name", "L3-seg-00001")
+        source_key = f"NIFTI::{volume_key}"
+        case_name = get_or_create_case_name(source_key)
 
         volume_data, spacing, volume_affine = load_nifti_volume(bytes_data)
         max_slice = int(volume_data.shape[2] - 1)
@@ -615,4 +602,3 @@ if uploaded is not None:
 
 else:
     st.info("Upload a DICOM file to start.")
-
