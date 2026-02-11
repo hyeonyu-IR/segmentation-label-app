@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.venv/
+venv/
+
+# Streamlit/runtime data
+data/area_log.csv
+data/case_counter.json
+
+# Local data and heavy assets
+dicom-images/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

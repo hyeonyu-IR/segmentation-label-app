@@ -1,0 +1,6 @@
+streamlit==1.29.0
+streamlit-drawable-canvas==0.9.3
+pydicom>=2.4
+numpy>=1.24
+Pillow>=10.0
+nibabel>=5.2
