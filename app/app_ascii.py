@@ -28,6 +28,13 @@ from infer_ascii import predict_mask
 AREA_LOG_FILE = Path(__file__).resolve().parents[1] / "data" / "area_log.csv"
 
 
+def normalize_source_name(name):
+    if not name:
+        return ""
+    s = str(name).strip().replace("\\", "/")
+    return s.split("/")[-1].lower()
+
+
 def make_case_name():
     return datetime.now().strftime("L3-seg-%Y%m%d-%H%M%S")
 
@@ -37,6 +44,45 @@ def get_or_create_case_name(source_key):
         st.session_state["current_source_key"] = source_key
         st.session_state["current_case_name"] = make_case_name()
     return st.session_state.get("current_case_name", make_case_name())
+
+
+@st.cache_data(show_spinner=False)
+def cached_load_dicom(bytes_data):
+    return load_dicom(io.BytesIO(bytes_data))
+
+
+@st.cache_data(show_spinner=False)
+def cached_load_nifti_volume(bytes_data):
+    return load_nifti_volume(bytes_data)
+
+
+def _area_log_mtime_token():
+    if AREA_LOG_FILE.exists():
+        st = AREA_LOG_FILE.stat()
+        return (st.st_mtime_ns, st.st_size)
+    return (-1, -1)
+
+
+@st.cache_data(show_spinner=False)
+def _read_area_log_cached(_mtime_token):
+    completed = set()
+    last_source = ""
+    last_case = ""
+    if not AREA_LOG_FILE.exists():
+        return tuple(), last_source, last_case
+    try:
+        with AREA_LOG_FILE.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                source = (r.get("original_file_name") or r.get("source_file") or "").strip()
+                case_id = (r.get("case_id") or "").strip()
+                if source:
+                    completed.add(source)
+                    last_source = source
+                    last_case = case_id
+    except Exception:
+        return tuple(), "", ""
+    return tuple(sorted(completed)), last_source, last_case
 
 
 def append_area_log_row(row_dict):
@@ -89,44 +135,73 @@ def append_area_log_row(row_dict):
 
 
 def load_completed_original_files():
-    completed = set()
-    if not AREA_LOG_FILE.exists():
-        return completed
-    try:
-        with AREA_LOG_FILE.open("r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                name = (r.get("original_file_name") or r.get("source_file") or "").strip()
-                if name:
-                    completed.add(name)
-    except Exception:
-        return completed
-    return completed
+    completed, _, _ = _read_area_log_cached(_area_log_mtime_token())
+    return {normalize_source_name(x) for x in completed if normalize_source_name(x)}
 
 
 def load_last_finalized_entry():
-    if not AREA_LOG_FILE.exists():
-        return "", ""
-    last_source = ""
-    last_case = ""
-    try:
-        with AREA_LOG_FILE.open("r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                source = (r.get("original_file_name") or r.get("source_file") or "").strip()
-                case_id = (r.get("case_id") or "").strip()
-                if source:
-                    last_source = source
-                    last_case = case_id
-    except Exception:
-        return "", ""
+    _, last_source, last_case = _read_area_log_cached(_area_log_mtime_token())
     return last_source, last_case
 
 
-def finalize_case_export(row_dict, source_file_name):
+def compute_hu_bundle(image_hu, label_masks, mask):
+    total_mean_hu, total_std_hu = compute_hu_stats(image_hu, mask)
+    psoas_mean_hu, psoas_std_hu = compute_hu_stats(image_hu, label_masks.get(1, np.zeros_like(mask)))
+    paraspinal_mean_hu, paraspinal_std_hu = compute_hu_stats(image_hu, label_masks.get(2, np.zeros_like(mask)))
+    abdominal_wall_mean_hu, abdominal_wall_std_hu = compute_hu_stats(image_hu, label_masks.get(3, np.zeros_like(mask)))
+    return (
+        total_mean_hu,
+        total_std_hu,
+        psoas_mean_hu,
+        psoas_std_hu,
+        paraspinal_mean_hu,
+        paraspinal_std_hu,
+        abdominal_wall_mean_hu,
+        abdominal_wall_std_hu,
+    )
+
+
+def finalize_case_export():
+    ctx = st.session_state.get("finalize_ctx")
+    if not ctx:
+        return
+    label_masks = ctx["label_masks"]
+    (
+        total_mean_hu,
+        total_std_hu,
+        psoas_mean_hu,
+        psoas_std_hu,
+        paraspinal_mean_hu,
+        paraspinal_std_hu,
+        abdominal_wall_mean_hu,
+        abdominal_wall_std_hu,
+    ) = compute_hu_bundle(ctx["image_hu"], label_masks, ctx["mask"])
+    row_dict = build_area_log_row(
+        case_name=ctx["case_name"],
+        input_type=ctx["input_type"],
+        source_file_name=ctx["source_file_name"],
+        volume_slice_idx=ctx["volume_slice_idx"],
+        area_cm2=ctx["area_cm2"],
+        muscle1_area=ctx["muscle1_area"],
+        muscle2_area=ctx["muscle2_area"],
+        muscle3_area=ctx["muscle3_area"],
+        total_mean_hu=total_mean_hu,
+        total_std_hu=total_std_hu,
+        psoas_mean_hu=psoas_mean_hu,
+        psoas_std_hu=psoas_std_hu,
+        paraspinal_mean_hu=paraspinal_mean_hu,
+        paraspinal_std_hu=paraspinal_std_hu,
+        abdominal_wall_mean_hu=abdominal_wall_mean_hu,
+        abdominal_wall_std_hu=abdominal_wall_std_hu,
+        window_center=ctx["window_center"],
+        window_width=ctx["window_width"],
+        rotation_deg=ctx["rotation_deg"],
+        flip_rl=ctx["flip_rl"],
+    )
     append_area_log_row(row_dict)
-    st.session_state["last_finalized_source_file"] = source_file_name
-    st.session_state["last_finalized_case_id"] = row_dict.get("case_id", "")
+    st.session_state["last_finalized_source_file"] = ctx["source_file_name"]
+    st.session_state["last_finalized_source_key"] = normalize_source_name(ctx["source_file_name"])
+    st.session_state["last_finalized_case_id"] = ctx["case_name"]
 
 
 def compute_hu_stats(image_hu, binary_mask):
@@ -212,11 +287,12 @@ st.title("L3 Skeletal Muscle Segmentation (MVP)")
 if "last_finalized_source_file" not in st.session_state:
     last_source, last_case = load_last_finalized_entry()
     st.session_state["last_finalized_source_file"] = last_source
+    st.session_state["last_finalized_source_key"] = normalize_source_name(last_source)
     st.session_state["last_finalized_case_id"] = last_case
 
 st.sidebar.header("Display")
-window_center = st.sidebar.slider("Window center", min_value=-1000, max_value=1000, value=50)
-window_width = st.sidebar.slider("Window width", min_value=50, max_value=2000, value=400)
+window_center = st.sidebar.slider("Window center", min_value=-700, max_value=700, value=50)
+window_width = st.sidebar.slider("Window width", min_value=200, max_value=1800, value=400)
 rotation_deg = st.sidebar.selectbox("Rotate view", [0, 90, 180, 270], index=0)
 flip_rl = st.sidebar.checkbox("R-L flip", value=False)
 
@@ -236,11 +312,12 @@ if uploaded is not None:
     volume_slice_idx = None
     case_name = make_case_name()
     source_file_name = uploaded.name
+    source_file_key = normalize_source_name(source_file_name)
     completed_files = load_completed_original_files()
+    finalized_now = source_file_key == st.session_state.get("last_finalized_source_key")
 
     if input_type == "DICOM slice":
-        dicom_path = io.BytesIO(bytes_data)
-        image_hu, spacing, ds = load_dicom(dicom_path)
+        image_hu, spacing, ds = cached_load_dicom(bytes_data)
         source_key = f"DICOM::{hashlib.sha1(bytes_data).hexdigest()[:16]}"
         case_name = get_or_create_case_name(source_key)
         source_id = f"DICOM::{uploaded.name}"
@@ -249,7 +326,7 @@ if uploaded is not None:
         source_key = f"NIFTI::{volume_key}"
         case_name = get_or_create_case_name(source_key)
 
-        volume_data, spacing, volume_affine = load_nifti_volume(bytes_data)
+        volume_data, spacing, volume_affine = cached_load_nifti_volume(bytes_data)
         max_slice = int(volume_data.shape[2] - 1)
         volume_sig = f"{uploaded.name}:{uploaded.size}:{volume_data.shape}"
         if st.session_state.get("nifti_sig") != volume_sig:
@@ -290,6 +367,7 @@ if uploaded is not None:
         canvas_max = 900
         tool = st.sidebar.selectbox("Tool", ["Draw", "Erase"], index=0)
         update_mode = st.sidebar.selectbox("Preview update", ["Realtime", "On submit"], index=1)
+        show_live_hu = st.sidebar.checkbox("Show live HU stats", value=False)
         label_options = [
             ("Psoas", 1, (255, 0, 0)),
             ("Paraspinal", 2, (0, 255, 0)),
@@ -311,7 +389,7 @@ if uploaded is not None:
                 f"<div style='font-size:20px; font-weight:900; color:#0b1f3a; background:#8E9FAD; border:1px solid #d9480f; border-radius:8px; padding:10px 12px; margin:0 0 10px 0;'>Case ID: {case_name}</div>",
                 unsafe_allow_html=True,
             )
-            if source_file_name in completed_files:
+            if source_file_key in completed_files or finalized_now:
                 st.warning(f"Already finalized before: {source_file_name}")
             else:
                 st.caption(f"Not finalized yet: {source_file_name}")
@@ -543,26 +621,35 @@ if uploaded is not None:
         st.write(f"Psoas area: {muscle1_area:.2f} cm^2")
         st.write(f"Paraspinal area: {muscle2_area:.2f} cm^2")
         st.write(f"Abdominal_Wall area: {muscle3_area:.2f} cm^2")
-        total_mean_hu, total_std_hu = compute_hu_stats(image_hu, mask)
-        psoas_mean_hu, psoas_std_hu = compute_hu_stats(image_hu, st.session_state["label_masks"].get(1, np.zeros_like(mask)))
-        paraspinal_mean_hu, paraspinal_std_hu = compute_hu_stats(image_hu, st.session_state["label_masks"].get(2, np.zeros_like(mask)))
-        abdominal_wall_mean_hu, abdominal_wall_std_hu = compute_hu_stats(image_hu, st.session_state["label_masks"].get(3, np.zeros_like(mask)))
-        if total_mean_hu is None:
-            st.write("Total HU: N/A")
+        if show_live_hu:
+            (
+                total_mean_hu,
+                total_std_hu,
+                psoas_mean_hu,
+                psoas_std_hu,
+                paraspinal_mean_hu,
+                paraspinal_std_hu,
+                abdominal_wall_mean_hu,
+                abdominal_wall_std_hu,
+            ) = compute_hu_bundle(image_hu, st.session_state["label_masks"], mask)
+            if total_mean_hu is None:
+                st.write("Total HU: N/A")
+            else:
+                st.write(f"Total HU: mean {total_mean_hu:.2f}, std {total_std_hu:.2f}")
+            if psoas_mean_hu is None:
+                st.write("Psoas HU: N/A")
+            else:
+                st.write(f"Psoas HU: mean {psoas_mean_hu:.2f}, std {psoas_std_hu:.2f}")
+            if paraspinal_mean_hu is None:
+                st.write("Paraspinal HU: N/A")
+            else:
+                st.write(f"Paraspinal HU: mean {paraspinal_mean_hu:.2f}, std {paraspinal_std_hu:.2f}")
+            if abdominal_wall_mean_hu is None:
+                st.write("Abdominal_Wall HU: N/A")
+            else:
+                st.write(f"Abdominal_Wall HU: mean {abdominal_wall_mean_hu:.2f}, std {abdominal_wall_std_hu:.2f}")
         else:
-            st.write(f"Total HU: mean {total_mean_hu:.2f}, std {total_std_hu:.2f}")
-        if psoas_mean_hu is None:
-            st.write("Psoas HU: N/A")
-        else:
-            st.write(f"Psoas HU: mean {psoas_mean_hu:.2f}, std {psoas_std_hu:.2f}")
-        if paraspinal_mean_hu is None:
-            st.write("Paraspinal HU: N/A")
-        else:
-            st.write(f"Paraspinal HU: mean {paraspinal_mean_hu:.2f}, std {paraspinal_std_hu:.2f}")
-        if abdominal_wall_mean_hu is None:
-            st.write("Abdominal_Wall HU: N/A")
-        else:
-            st.write(f"Abdominal_Wall HU: mean {abdominal_wall_mean_hu:.2f}, std {abdominal_wall_std_hu:.2f}")
+            st.caption("Live HU stats disabled for speed. HU is still computed when you finalize and saved to CSV.")
 
         st.caption(f"Area log file: {AREA_LOG_FILE}")
         st.caption("Use the primary Finalize button in Downloads to save CSV + download pair together.")
@@ -606,35 +693,29 @@ if uploaded is not None:
         unsafe_allow_html=True,
     )
     if mode == "Manual annotation":
-        area_row = build_area_log_row(
-            case_name=case_name,
-            input_type=input_type,
-            source_file_name=source_file_name,
-            volume_slice_idx=volume_slice_idx,
-            area_cm2=area_cm2,
-            muscle1_area=muscle1_area,
-            muscle2_area=muscle2_area,
-            muscle3_area=muscle3_area,
-            total_mean_hu=total_mean_hu,
-            total_std_hu=total_std_hu,
-            psoas_mean_hu=psoas_mean_hu,
-            psoas_std_hu=psoas_std_hu,
-            paraspinal_mean_hu=paraspinal_mean_hu,
-            paraspinal_std_hu=paraspinal_std_hu,
-            abdominal_wall_mean_hu=abdominal_wall_mean_hu,
-            abdominal_wall_std_hu=abdominal_wall_std_hu,
-            window_center=window_center,
-            window_width=window_width,
-            rotation_deg=rotation_deg,
-            flip_rl=flip_rl,
-        )
+        st.session_state["finalize_ctx"] = {
+            "case_name": case_name,
+            "input_type": input_type,
+            "source_file_name": source_file_name,
+            "volume_slice_idx": volume_slice_idx,
+            "area_cm2": area_cm2,
+            "muscle1_area": muscle1_area,
+            "muscle2_area": muscle2_area,
+            "muscle3_area": muscle3_area,
+            "window_center": window_center,
+            "window_width": window_width,
+            "rotation_deg": rotation_deg,
+            "flip_rl": flip_rl,
+            "image_hu": image_hu,
+            "mask": mask,
+            "label_masks": {k: v.copy() for k, v in st.session_state["label_masks"].items()},
+        }
         st.download_button(
             "Finalize case: save CSV + download pair ZIP",
             data=pair_zip,
             file_name=f"{case_name}-pair.zip" if input_type == "NIfTI volume (.nii.gz)" else "image_label_pair.zip",
             mime="application/zip",
             on_click=finalize_case_export,
-            args=(area_row, source_file_name),
         )
     else:
         st.download_button(
