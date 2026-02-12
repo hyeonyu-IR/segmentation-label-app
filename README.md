@@ -97,6 +97,15 @@ For future nnUNet training, prefer using `label_map_XXXXX.nii.gz`.
 Combined three-class overlay (single image, with class colors):
 ![Overlay three classes with legend](docs/images/overlays/overlay-three-classes-example.png)
 
+Example metrics for this figure (case `L3-seg-20260211-172418`):
+
+| Region | Area (cm^2) | HU Mean | HU Std |
+|---|---:|---:|---:|
+| Psoas | 13.17 | 25.87 | 34.65 |
+| Paraspinal | 42.48 | 23.97 | 31.91 |
+| Abdominal_Wall | 41.36 | 10.89 | 38.21 |
+| Total | 97.01 | 18.65 | 35.73 |
+
 ## Best Practice Checklist
 
 - Confirm input type is `NIfTI volume (.nii.gz)` (default) when working with AMOS22 cases.
