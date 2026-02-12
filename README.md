@@ -59,13 +59,12 @@ Alternative (if you `cd segmentation-label-app` first):
 - `label_map_volume_00001.nii.gz`, ... (full 3D label volume with your annotated slice at selected Z)
 
 For `NIfTI volume (.nii.gz)` input, the app auto-assigns a case ID:
-- Timestamp-based format: `L3-seg-YYYYMMDD-HHMMSS`
-- Example: `L3-seg-20260211-113600`
+- `L3-seg-YYYYMMDD-HHMMSS-xxxx` (timestamp + short hash suffix)
 
 Download names for that case:
-- `L3-seg-20260211-113600-image.nii.gz`
-- `L3-seg-20260211-113600-label.nii.gz`
-- `L3-seg-20260211-113600-label-volume.nii.gz` (optional 3D export)
+- `L3-seg-YYYYMMDD-HHMMSS-xxxx-image.nii.gz`
+- `L3-seg-YYYYMMDD-HHMMSS-xxxx-label.nii.gz`
+- `L3-seg-YYYYMMDD-HHMMSS-xxxx-label-volume.nii.gz` (optional 3D export)
 
 Area logging:
 - Click `Finalize case: save CSV + download pair ZIP` in `Downloads`.
@@ -92,6 +91,22 @@ Results panel:
   - `3` = Abdominal_Wall
 
 For future nnUNet training, prefer using `label_map_XXXXX.nii.gz`.
+
+## Examples
+
+Combined three-class overlay (single image, with class colors):
+![Overlay three classes with legend](docs/images/overlays/overlay-three-classes-example.png)
+
+Three-class overlay examples from `combined-image-label-files`:
+
+Case `L3-seg-20260211-172418`:
+![Overlay all classes - 20260211-172418](docs/images/overlays/L3-seg-20260211-172418-overlay-all.png)
+
+Case `L3-seg-20260211-172750`:
+![Overlay all classes - 20260211-172750](docs/images/overlays/L3-seg-20260211-172750-overlay-all.png)
+
+Case `L3-seg-20260211-173032`:
+![Overlay all classes - 20260211-173032](docs/images/overlays/L3-seg-20260211-173032-overlay-all.png)
 
 ## Best Practice Checklist
 
@@ -179,4 +194,4 @@ Exit code:
 - `2` = invalid arguments/path setup
 
 ---
-This project and workflow were completed through collaboration between Hyeon Yu and Codex.
+This project and workflow were completed using Codex.
