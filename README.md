@@ -97,17 +97,6 @@ For future nnUNet training, prefer using `label_map_XXXXX.nii.gz`.
 Combined three-class overlay (single image, with class colors):
 ![Overlay three classes with legend](docs/images/overlays/overlay-three-classes-example.png)
 
-Three-class overlay examples from `combined-image-label-files`:
-
-Case `L3-seg-20260211-172418`:
-![Overlay all classes - 20260211-172418](docs/images/overlays/L3-seg-20260211-172418-overlay-all.png)
-
-Case `L3-seg-20260211-172750`:
-![Overlay all classes - 20260211-172750](docs/images/overlays/L3-seg-20260211-172750-overlay-all.png)
-
-Case `L3-seg-20260211-173032`:
-![Overlay all classes - 20260211-173032](docs/images/overlays/L3-seg-20260211-173032-overlay-all.png)
-
 ## Best Practice Checklist
 
 - Confirm input type is `NIfTI volume (.nii.gz)` (default) when working with AMOS22 cases.
