@@ -87,6 +87,26 @@ def overlay_mask(image_uint8, mask, color=(255, 0, 0), alpha=0.4):
     return out
 
 
+def overlay_label_map(image_uint8, label_map, color_map, alpha=0.4):
+    # image_uint8: HxW uint8
+    # label_map: HxW integer labels
+    base = Image.fromarray(image_uint8).convert("RGB")
+    out = base.copy()
+    arr = np.array(out, dtype=np.uint8)
+    lm = label_map.astype(np.int32)
+
+    for label_id, color in color_map.items():
+        region = lm == int(label_id)
+        if not np.any(region):
+            continue
+        c = np.array(color, dtype=np.float32)
+        a = float(alpha)
+        arr_region = arr[region].astype(np.float32)
+        arr[region] = np.clip((1.0 - a) * arr_region + a * c, 0, 255).astype(np.uint8)
+
+    return Image.fromarray(arr, mode="RGB")
+
+
 def mask_to_pil(mask):
     mask_img = (mask.astype(np.uint8) * 255).astype(np.uint8)
     return Image.fromarray(mask_img, mode="L")

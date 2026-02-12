@@ -45,6 +45,7 @@ def append_area_log_row(row_dict):
         "timestamp",
         "case_id",
         "input_type",
+        "original_file_name",
         "source_file",
         "slice_index_z",
         "total_area_cm2",
@@ -87,6 +88,47 @@ def append_area_log_row(row_dict):
         writer.writerow(row_dict)
 
 
+def load_completed_original_files():
+    completed = set()
+    if not AREA_LOG_FILE.exists():
+        return completed
+    try:
+        with AREA_LOG_FILE.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                name = (r.get("original_file_name") or r.get("source_file") or "").strip()
+                if name:
+                    completed.add(name)
+    except Exception:
+        return completed
+    return completed
+
+
+def load_last_finalized_entry():
+    if not AREA_LOG_FILE.exists():
+        return "", ""
+    last_source = ""
+    last_case = ""
+    try:
+        with AREA_LOG_FILE.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                source = (r.get("original_file_name") or r.get("source_file") or "").strip()
+                case_id = (r.get("case_id") or "").strip()
+                if source:
+                    last_source = source
+                    last_case = case_id
+    except Exception:
+        return "", ""
+    return last_source, last_case
+
+
+def finalize_case_export(row_dict, source_file_name):
+    append_area_log_row(row_dict)
+    st.session_state["last_finalized_source_file"] = source_file_name
+    st.session_state["last_finalized_case_id"] = row_dict.get("case_id", "")
+
+
 def compute_hu_stats(image_hu, binary_mask):
     vals = image_hu[binary_mask > 0]
     if vals.size == 0:
@@ -120,6 +162,7 @@ def build_area_log_row(
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "case_id": case_name,
         "input_type": input_type,
+        "original_file_name": source_file_name,
         "source_file": source_file_name,
         "slice_index_z": "" if volume_slice_idx is None else int(volume_slice_idx),
         "total_area_cm2": f"{float(area_cm2):.4f}",
@@ -165,6 +208,12 @@ st.set_page_config(page_title="L3 Muscle Segmentation", layout="wide")
 
 st.title("L3 Skeletal Muscle Segmentation (MVP)")
 
+# Persist "Last finalized" across app restarts using the CSV log.
+if "last_finalized_source_file" not in st.session_state:
+    last_source, last_case = load_last_finalized_entry()
+    st.session_state["last_finalized_source_file"] = last_source
+    st.session_state["last_finalized_case_id"] = last_case
+
 st.sidebar.header("Display")
 window_center = st.sidebar.slider("Window center", min_value=-1000, max_value=1000, value=50)
 window_width = st.sidebar.slider("Window width", min_value=50, max_value=2000, value=400)
@@ -187,6 +236,7 @@ if uploaded is not None:
     volume_slice_idx = None
     case_name = make_case_name()
     source_file_name = uploaded.name
+    completed_files = load_completed_original_files()
 
     if input_type == "DICOM slice":
         dicom_path = io.BytesIO(bytes_data)
@@ -221,7 +271,6 @@ if uploaded is not None:
         )
         image_hu = volume_data[:, :, volume_slice_idx]
         source_id = f"NIFTI::{uploaded.name}::Z{volume_slice_idx}"
-        st.caption(f"Case ID: {case_name}")
 
     rot_k = int(rotation_deg // 90)
     if rot_k:
@@ -257,6 +306,15 @@ if uploaded is not None:
             fill_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {brush_alpha})"
 
         st.subheader("Annotation")
+        if input_type == "NIfTI volume (.nii.gz)":
+            st.markdown(
+                f"<div style='font-size:20px; font-weight:900; color:#0b1f3a; background:#8E9FAD; border:1px solid #d9480f; border-radius:8px; padding:10px 12px; margin:0 0 10px 0;'>Case ID: {case_name}</div>",
+                unsafe_allow_html=True,
+            )
+            if source_file_name in completed_files:
+                st.warning(f"Already finalized before: {source_file_name}")
+            else:
+                st.caption(f"Not finalized yet: {source_file_name}")
         # Downscale large images for canvas stability
         h, w = image_u8.shape
         scale = float(canvas_max) / float(max(h, w))
@@ -303,6 +361,57 @@ if uploaded is not None:
                 3: np.zeros((disp_h, disp_w), dtype=np.uint8),
             }
             st.session_state["pending_shape"] = (disp_h, disp_w)
+
+        def _commit_pending_small_to_label_masks():
+            for lid in [1, 2, 3]:
+                pm_draw = st.session_state["pending_draw_small_by_label"][lid]
+                pm_erase = st.session_state["pending_erase_small_by_label"][lid]
+                if scale != 1.0:
+                    mask_draw = np.array(
+                        Image.fromarray(pm_draw).resize((w, h), Image.NEAREST)
+                    ).astype(np.uint8)
+                    mask_erase = np.array(
+                        Image.fromarray(pm_erase).resize((w, h), Image.NEAREST)
+                    ).astype(np.uint8)
+                else:
+                    mask_draw = pm_draw
+                    mask_erase = pm_erase
+
+                if mask_draw.sum() > 0:
+                    st.session_state["label_masks"][lid] = np.maximum(
+                        st.session_state["label_masks"][lid], mask_draw
+                    ).astype(np.uint8)
+                if mask_erase.sum() > 0:
+                    m = st.session_state["label_masks"][lid]
+                    m[mask_erase > 0] = 0
+                    st.session_state["label_masks"][lid] = m
+
+            st.session_state["pending_draw_small_by_label"] = {
+                1: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                2: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                3: np.zeros((disp_h, disp_w), dtype=np.uint8),
+            }
+            st.session_state["pending_erase_small_by_label"] = {
+                1: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                2: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                3: np.zeros((disp_h, disp_w), dtype=np.uint8),
+            }
+
+        # In On submit mode, switching tool should start from a clean live canvas.
+        # This prevents erase from unintentionally reusing prior draw strokes.
+        if update_mode == "On submit":
+            prev_tool = st.session_state.get("active_tool")
+            if prev_tool is None:
+                st.session_state["active_tool"] = tool
+            elif prev_tool != tool:
+                _commit_pending_small_to_label_masks()
+                st.session_state["active_tool"] = tool
+                st.session_state["canvas_key"] += 1
+                st.session_state["last_canvas_hash"] = None
+                # Important: force rerun so stale canvas pixels from the previous
+                # tool are not processed under the new tool type.
+                st.rerun()
+
         canvas_result = st_canvas(
             fill_color=fill_color,
             stroke_width=brush_size,
@@ -353,39 +462,7 @@ if uploaded is not None:
 
         if update_mode == "On submit":
             if st.button("Apply annotations"):
-                for lid in [1, 2, 3]:
-                    pm_draw = st.session_state["pending_draw_small_by_label"][lid]
-                    pm_erase = st.session_state["pending_erase_small_by_label"][lid]
-                    if scale != 1.0:
-                        mask_draw = np.array(
-                            Image.fromarray(pm_draw).resize((w, h), Image.NEAREST)
-                        ).astype(np.uint8)
-                        mask_erase = np.array(
-                            Image.fromarray(pm_erase).resize((w, h), Image.NEAREST)
-                        ).astype(np.uint8)
-                    else:
-                        mask_draw = pm_draw
-                        mask_erase = pm_erase
-
-                    if mask_draw.sum() > 0:
-                        st.session_state["label_masks"][lid] = np.maximum(
-                            st.session_state["label_masks"][lid], mask_draw
-                        ).astype(np.uint8)
-                    if mask_erase.sum() > 0:
-                        m = st.session_state["label_masks"][lid]
-                        m[mask_erase > 0] = 0
-                        st.session_state["label_masks"][lid] = m
-
-                st.session_state["pending_draw_small_by_label"] = {
-                    1: np.zeros((disp_h, disp_w), dtype=np.uint8),
-                    2: np.zeros((disp_h, disp_w), dtype=np.uint8),
-                    3: np.zeros((disp_h, disp_w), dtype=np.uint8),
-                }
-                st.session_state["pending_erase_small_by_label"] = {
-                    1: np.zeros((disp_h, disp_w), dtype=np.uint8),
-                    2: np.zeros((disp_h, disp_w), dtype=np.uint8),
-                    3: np.zeros((disp_h, disp_w), dtype=np.uint8),
-                }
+                _commit_pending_small_to_label_masks()
                 st.session_state["last_canvas_hash"] = None
                 st.session_state["canvas_key"] += 1
 
@@ -470,6 +547,22 @@ if uploaded is not None:
         psoas_mean_hu, psoas_std_hu = compute_hu_stats(image_hu, st.session_state["label_masks"].get(1, np.zeros_like(mask)))
         paraspinal_mean_hu, paraspinal_std_hu = compute_hu_stats(image_hu, st.session_state["label_masks"].get(2, np.zeros_like(mask)))
         abdominal_wall_mean_hu, abdominal_wall_std_hu = compute_hu_stats(image_hu, st.session_state["label_masks"].get(3, np.zeros_like(mask)))
+        if total_mean_hu is None:
+            st.write("Total HU: N/A")
+        else:
+            st.write(f"Total HU: mean {total_mean_hu:.2f}, std {total_std_hu:.2f}")
+        if psoas_mean_hu is None:
+            st.write("Psoas HU: N/A")
+        else:
+            st.write(f"Psoas HU: mean {psoas_mean_hu:.2f}, std {psoas_std_hu:.2f}")
+        if paraspinal_mean_hu is None:
+            st.write("Paraspinal HU: N/A")
+        else:
+            st.write(f"Paraspinal HU: mean {paraspinal_mean_hu:.2f}, std {paraspinal_std_hu:.2f}")
+        if abdominal_wall_mean_hu is None:
+            st.write("Abdominal_Wall HU: N/A")
+        else:
+            st.write(f"Abdominal_Wall HU: mean {abdominal_wall_mean_hu:.2f}, std {abdominal_wall_std_hu:.2f}")
 
         st.caption(f"Area log file: {AREA_LOG_FILE}")
         st.caption("Use the primary Finalize button in Downloads to save CSV + download pair together.")
@@ -540,8 +633,8 @@ if uploaded is not None:
             data=pair_zip,
             file_name=f"{case_name}-pair.zip" if input_type == "NIfTI volume (.nii.gz)" else "image_label_pair.zip",
             mime="application/zip",
-            on_click=append_area_log_row,
-            args=(area_row,),
+            on_click=finalize_case_export,
+            args=(area_row, source_file_name),
         )
     else:
         st.download_button(
@@ -599,6 +692,12 @@ if uploaded is not None:
     buf_overlay = io.BytesIO()
     overlay.save(buf_overlay, format="PNG")
     st.download_button("Download overlay (PNG)", data=buf_overlay.getvalue(), file_name="overlay.png", mime="image/png")
+
+    if st.session_state.get("last_finalized_source_file"):
+        st.caption(
+            f"Last finalized: {st.session_state.get('last_finalized_source_file')} "
+            f"(case {st.session_state.get('last_finalized_case_id','')})"
+        )
 
 else:
     st.info("Upload a DICOM file to start.")

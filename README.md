@@ -71,6 +71,16 @@ Area logging:
 - Click `Finalize case: save CSV + download pair ZIP` in `Downloads`.
 - Log file: `segmentation-label-app/data/area_log.csv`
 - Each row stores case ID, source file, selected Z slice, total area, per-muscle areas, HU mean/std (total and per muscle), and view settings.
+- The app also displays completion status in the UI so you can avoid duplicate work:
+  - Current source file: `Already finalized` or `Not finalized yet`
+  - `Last finalized: <original_file_name> (case <case_id>)`
+
+Results panel:
+- Shows muscle area and HU stats for:
+  - `Psoas`
+  - `Paraspinal`
+  - `Abdominal_Wall`
+  - `Total`
 
 ## Output Meaning
 
@@ -83,9 +93,24 @@ Area logging:
 
 For future nnUNet training, prefer using `label_map_XXXXX.nii.gz`.
 
+## Best Practice Checklist
+
+- Confirm input type is `NIfTI volume (.nii.gz)` (default) when working with AMOS22 cases.
+- Select the target L3 slice first, then keep the same slice while annotating all muscle classes.
+- Annotate one class at a time (`Psoas`, `Paraspinal`, `Abdominal_Wall`) and click `Apply annotations` after each class.
+- If canvas turns black after label switching, adjust `Window center` slightly to refresh the image.
+- Use `Results` to confirm per-muscle area/HU and total values look reasonable before export.
+- Use `Finalize case: save CSV + download pair ZIP` once per completed case.
+- Check the completion status text (`Already finalized` / `Not finalized yet`) to avoid duplicate processing.
+- If needed, review `Last finalized: <original_file_name> (case <case_id>)` before opening the next volume.
+- Keep outputs organized in separate `images/` and `labels/` folders for training.
+
 ## Known Notes
 
 - Browser cannot force a custom save folder; download destination is controlled by browser settings.
+- Canvas can occasionally appear black after switching label type.
+- Safe workaround: adjust `Window center` slightly (then optionally return it to the original value). This refreshes the image without losing the applied segmentation state.
+- Less safe workaround: changing slice can restore the image, but can disturb ongoing live-canvas state depending on current preview mode.
 - If launch fails due module mismatch, verify versions:
 
 ```powershell
@@ -152,3 +177,6 @@ Exit code:
 - `0` = all checks passed
 - `1` = validation issues found
 - `2` = invalid arguments/path setup
+
+---
+This project and workflow were completed through collaboration between Hyeon Yu and Codex.
