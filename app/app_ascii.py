@@ -3,6 +3,8 @@ import os
 import hashlib
 import csv
 import zipfile
+import re
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 import streamlit as st
@@ -32,7 +34,26 @@ def normalize_source_name(name):
     if not name:
         return ""
     s = str(name).strip().replace("\\", "/")
-    return s.split("/")[-1].lower()
+    s = s.split("/")[-1].lower()
+    # Normalize common medical file extensions so matching is robust
+    # across uploader/browser filename variations.
+    if s.endswith(".nii.gz"):
+        s = s[:-7]
+    elif s.endswith(".nii"):
+        s = s[:-4]
+    elif s.endswith(".dcm"):
+        s = s[:-4]
+    elif s.endswith(".dicom"):
+        s = s[:-6]
+    return s
+
+
+def extract_amos_case_id(name):
+    s = normalize_source_name(name)
+    m = re.search(r"amos_(\d+)", s)
+    if not m:
+        return ""
+    return f"amos_{int(m.group(1)):04d}"
 
 
 def make_case_name():
@@ -68,8 +89,9 @@ def _read_area_log_cached(_mtime_token):
     completed = set()
     last_source = ""
     last_case = ""
+    recent_sources = deque(maxlen=3)
     if not AREA_LOG_FILE.exists():
-        return tuple(), last_source, last_case
+        return tuple(), last_source, last_case, tuple()
     try:
         with AREA_LOG_FILE.open("r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -80,9 +102,10 @@ def _read_area_log_cached(_mtime_token):
                     completed.add(source)
                     last_source = source
                     last_case = case_id
+                    recent_sources.append(source)
     except Exception:
-        return tuple(), "", ""
-    return tuple(sorted(completed)), last_source, last_case
+        return tuple(), "", "", tuple()
+    return tuple(sorted(completed)), last_source, last_case, tuple(reversed(recent_sources))
 
 
 def append_area_log_row(row_dict):
@@ -135,13 +158,27 @@ def append_area_log_row(row_dict):
 
 
 def load_completed_original_files():
-    completed, _, _ = _read_area_log_cached(_area_log_mtime_token())
+    completed, _, _, _ = _read_area_log_cached(_area_log_mtime_token())
     return {normalize_source_name(x) for x in completed if normalize_source_name(x)}
 
 
+def load_completed_amos_case_ids(completed_names):
+    out = set()
+    for n in completed_names:
+        cid = extract_amos_case_id(n)
+        if cid:
+            out.add(cid)
+    return out
+
+
 def load_last_finalized_entry():
-    _, last_source, last_case = _read_area_log_cached(_area_log_mtime_token())
+    _, last_source, last_case, _ = _read_area_log_cached(_area_log_mtime_token())
     return last_source, last_case
+
+
+def load_recent_finalized_original_files():
+    _, _, _, recent_sources = _read_area_log_cached(_area_log_mtime_token())
+    return list(recent_sources)
 
 
 def compute_hu_bundle(image_hu, label_masks, mask):
@@ -313,7 +350,9 @@ if uploaded is not None:
     case_name = make_case_name()
     source_file_name = uploaded.name
     source_file_key = normalize_source_name(source_file_name)
+    source_amos_case_id = extract_amos_case_id(source_file_name)
     completed_files = load_completed_original_files()
+    completed_amos_case_ids = load_completed_amos_case_ids(completed_files)
     finalized_now = source_file_key == st.session_state.get("last_finalized_source_key")
 
     if input_type == "DICOM slice":
@@ -331,7 +370,7 @@ if uploaded is not None:
         volume_sig = f"{uploaded.name}:{uploaded.size}:{volume_data.shape}"
         if st.session_state.get("nifti_sig") != volume_sig:
             st.session_state["nifti_sig"] = volume_sig
-            st.session_state["nifti_z_idx"] = max_slice // 2
+            st.session_state["nifti_z_idx"] = (2 * max_slice) // 3
         st.subheader("Volume navigation")
         nav_c1, nav_c2, nav_c3 = st.columns([1, 1, 6])
         with nav_c1:
@@ -340,12 +379,15 @@ if uploaded is not None:
         with nav_c2:
             if st.button("Next slice"):
                 st.session_state["nifti_z_idx"] = max(0, int(st.session_state["nifti_z_idx"]) - 1)
-        volume_slice_idx = st.slider(
-            "Axial slice index (Z)",
+        # Reverse display so 0 appears on the right end of the slider.
+        display_idx = st.slider(
+            "Axial slice index (Z) [0 on right]",
             min_value=0,
             max_value=max_slice,
-            key="nifti_z_idx",
+            value=max_slice - int(st.session_state["nifti_z_idx"]),
         )
+        st.session_state["nifti_z_idx"] = max_slice - int(display_idx)
+        volume_slice_idx = int(st.session_state["nifti_z_idx"])
         image_hu = volume_data[:, :, volume_slice_idx]
         source_id = f"NIFTI::{uploaded.name}::Z{volume_slice_idx}"
 
@@ -362,18 +404,18 @@ if uploaded is not None:
 
     if mode == "Manual annotation":
         st.sidebar.header("Annotation")
-        brush_size = st.sidebar.slider("Brush size", min_value=2, max_value=50, value=12)
+        brush_size = st.sidebar.slider("Brush size", min_value=2, max_value=50, value=11)
         brush_alpha = st.sidebar.slider("Brush transparency", min_value=0.05, max_value=0.9, value=0.25)
         canvas_max = 900
-        tool = st.sidebar.selectbox("Tool", ["Draw", "Erase"], index=0)
-        update_mode = st.sidebar.selectbox("Preview update", ["Realtime", "On submit"], index=1)
-        show_live_hu = st.sidebar.checkbox("Show live HU stats", value=False)
         label_options = [
             ("Psoas", 1, (255, 0, 0)),
             ("Paraspinal", 2, (0, 255, 0)),
             ("Abdominal_Wall", 3, (0, 128, 255)),
         ]
         label_name = st.sidebar.selectbox("Active label", [x[0] for x in label_options], index=0)
+        tool = st.sidebar.selectbox("Tool", ["Draw", "Erase"], index=0)
+        update_mode = st.sidebar.selectbox("Preview update", ["Realtime", "On submit"], index=1)
+        show_live_hu = st.sidebar.checkbox("Show live HU stats", value=False)
         label_id = next(x[1] for x in label_options if x[0] == label_name)
         rgb = next(x[2] for x in label_options if x[0] == label_name)
         if tool == "Erase":
@@ -386,13 +428,24 @@ if uploaded is not None:
         st.subheader("Annotation")
         if input_type == "NIfTI volume (.nii.gz)":
             st.markdown(
-                f"<div style='font-size:20px; font-weight:900; color:#0b1f3a; background:#8E9FAD; border:1px solid #d9480f; border-radius:8px; padding:10px 12px; margin:0 0 10px 0;'>Case ID: {case_name}</div>",
+                f"<div style='font-weight:700; color:#f8f9fa;'>Case ID: {case_name}</div>",
                 unsafe_allow_html=True,
             )
-            if source_file_key in completed_files or finalized_now:
-                st.warning(f"Already finalized before: {source_file_name}")
+            is_completed = (
+                source_file_key in completed_files
+                or finalized_now
+                or (source_amos_case_id and source_amos_case_id in completed_amos_case_ids)
+            )
+            if is_completed:
+                st.markdown(
+                    f"<div style='font-weight:700; color:#ff922b;'>Status: Finalized ({source_file_name})</div>",
+                    unsafe_allow_html=True,
+                )
             else:
-                st.caption(f"Not finalized yet: {source_file_name}")
+                st.markdown(
+                    f"<div style='font-weight:700; color:#f8f9fa;'>Status: Not finalized yet ({source_file_name})</div>",
+                    unsafe_allow_html=True,
+                )
         # Downscale large images for canvas stability
         h, w = image_u8.shape
         scale = float(canvas_max) / float(max(h, w))
@@ -724,61 +777,67 @@ if uploaded is not None:
             file_name=f"{case_name}-pair.zip" if input_type == "NIfTI volume (.nii.gz)" else "image_label_pair.zip",
             mime="application/zip",
         )
-
-    st.download_button(
-        "Download baseline slice (NIfTI)",
-        data=image_nifti,
-        file_name=image_file_name,
-        mime="application/gzip",
-    )
-
-    mask_pil = mask_to_pil(mask)
-
-    buf_mask = io.BytesIO()
-    mask_pil.save(buf_mask, format="PNG")
-    st.download_button("Download mask (PNG)", data=buf_mask.getvalue(), file_name="mask.png", mime="image/png")
-
-    nifti_bytes = mask_to_nifti_bytes(mask, spacing)
-    st.download_button("Download mask (NIfTI)", data=nifti_bytes, file_name="mask.nii.gz", mime="application/gzip")
-
-    if mode == "Manual annotation":
-        label_nifti = pair_label_nifti
-        if "export_idx" not in st.session_state:
-            st.session_state["export_idx"] = 1
-        idx = st.session_state["export_idx"]
-        def _inc_export():
-            st.session_state["export_idx"] += 1
+    with st.expander("Advanced downloads", expanded=False):
         st.download_button(
-            "Download label map (NIfTI)",
-            data=label_nifti,
-            file_name=label_file_name if input_type == "NIfTI volume (.nii.gz)" else f"label_map_{idx:05d}.nii.gz",
+            "Baseline slice (NIfTI)",
+            data=image_nifti,
+            file_name=image_file_name,
             mime="application/gzip",
-            on_click=_inc_export,
         )
-        if input_type == "NIfTI volume (.nii.gz)" and volume_data is not None and volume_affine is not None:
-            full_label_volume = np.zeros(volume_data.shape, dtype=np.uint8)
-            label_map_for_volume = label_map.astype(np.uint8)
-            label_map_for_volume = unflip_lr_2d(label_map_for_volume, flip_rl)
-            if rot_k:
-                label_map_for_volume = unrotate_2d(label_map_for_volume, rot_k)
-            full_label_volume[:, :, int(volume_slice_idx)] = label_map_for_volume
-            full_label_nifti = labelmap_volume_to_nifti_bytes(full_label_volume, volume_affine)
-            st.download_button(
-                "Download full-volume label map (NIfTI)",
-                data=full_label_nifti,
-                file_name=volume_label_file_name,
-                mime="application/gzip",
-            )
 
-    buf_overlay = io.BytesIO()
-    overlay.save(buf_overlay, format="PNG")
-    st.download_button("Download overlay (PNG)", data=buf_overlay.getvalue(), file_name="overlay.png", mime="image/png")
+        mask_pil = mask_to_pil(mask)
+        buf_mask = io.BytesIO()
+        mask_pil.save(buf_mask, format="PNG")
+        st.download_button("Mask (PNG)", data=buf_mask.getvalue(), file_name="mask.png", mime="image/png")
+
+        nifti_bytes = mask_to_nifti_bytes(mask, spacing)
+        st.download_button("Mask (NIfTI)", data=nifti_bytes, file_name="mask.nii.gz", mime="application/gzip")
+
+        if mode == "Manual annotation":
+            label_nifti = pair_label_nifti
+            if "export_idx" not in st.session_state:
+                st.session_state["export_idx"] = 1
+            idx = st.session_state["export_idx"]
+
+            def _inc_export():
+                st.session_state["export_idx"] += 1
+
+            st.download_button(
+                "Label map (NIfTI)",
+                data=label_nifti,
+                file_name=label_file_name if input_type == "NIfTI volume (.nii.gz)" else f"label_map_{idx:05d}.nii.gz",
+                mime="application/gzip",
+                on_click=_inc_export,
+            )
+            if input_type == "NIfTI volume (.nii.gz)" and volume_data is not None and volume_affine is not None:
+                full_label_volume = np.zeros(volume_data.shape, dtype=np.uint8)
+                label_map_for_volume = label_map.astype(np.uint8)
+                label_map_for_volume = unflip_lr_2d(label_map_for_volume, flip_rl)
+                if rot_k:
+                    label_map_for_volume = unrotate_2d(label_map_for_volume, rot_k)
+                full_label_volume[:, :, int(volume_slice_idx)] = label_map_for_volume
+                full_label_nifti = labelmap_volume_to_nifti_bytes(full_label_volume, volume_affine)
+                st.download_button(
+                    "Full-volume label map (NIfTI)",
+                    data=full_label_nifti,
+                    file_name=volume_label_file_name,
+                    mime="application/gzip",
+                )
+
+        buf_overlay = io.BytesIO()
+        overlay.save(buf_overlay, format="PNG")
+        st.download_button("Overlay (PNG)", data=buf_overlay.getvalue(), file_name="overlay.png", mime="image/png")
 
     if st.session_state.get("last_finalized_source_file"):
         st.caption(
             f"Last finalized: {st.session_state.get('last_finalized_source_file')} "
             f"(case {st.session_state.get('last_finalized_case_id','')})"
         )
+        recent = load_recent_finalized_original_files()
+        if recent:
+            st.caption("Recent finalized originals (latest 3):")
+            for n in recent:
+                st.caption(f"- {n}")
 
 else:
     st.info("Upload a DICOM file to start.")

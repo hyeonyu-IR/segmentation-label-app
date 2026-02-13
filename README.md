@@ -191,5 +191,76 @@ Exit code:
 - `1` = validation issues found
 - `2` = invalid arguments/path setup
 
+## 2D nnUNet Training (L3 Slices)
+
+This project supports training a 2D nnUNetv2 multi-class model using paired files in:
+
+- `C:\Users\hyeon\Documents\miniconda_medimg_env\data\L3-skeletal-muscle-segmentation\combined-image-label-files`
+
+Expected pair format:
+
+- `*-image.nii.gz`
+- `*-label.nii.gz`
+
+### 1. Prepare nnUNet dataset
+
+Run:
+
+```powershell
+python segmentation-label-app\scripts\prepare_nnunet_2d_dataset.py `
+  --source-dir "C:\Users\hyeon\Documents\miniconda_medimg_env\data\L3-skeletal-muscle-segmentation\combined-image-label-files" `
+  --nnunet-raw-dir "C:\Users\hyeon\Documents\miniconda_medimg_env\data\nnUNet_raw" `
+  --dataset-id 711 `
+  --dataset-name L3SM `
+  --overwrite
+```
+
+This creates:
+
+- `...\nnUNet_raw\Dataset711_L3SM\imagesTr\*_0000.nii.gz`
+- `...\nnUNet_raw\Dataset711_L3SM\labelsTr\*.nii.gz`
+- `...\nnUNet_raw\Dataset711_L3SM\dataset.json`
+
+### 2. Set nnUNetv2 paths
+
+```powershell
+$env:nnUNet_raw="C:\Users\hyeon\Documents\miniconda_medimg_env\data\nnUNet_raw"
+$env:nnUNet_preprocessed="C:\Users\hyeon\Documents\miniconda_medimg_env\data\nnUNet_preprocessed"
+$env:nnUNet_results="C:\Users\hyeon\Documents\miniconda_medimg_env\data\nnUNet_results"
+```
+
+### 3. Plan + preprocess (2D-ready pipeline)
+
+```powershell
+nnUNetv2_plan_and_preprocess -d 711 --verify_dataset_integrity
+```
+
+### 4. Train 5 folds (2D)
+
+Run folds `0..4`:
+
+```powershell
+nnUNetv2_train 711 2d 0
+nnUNetv2_train 711 2d 1
+nnUNetv2_train 711 2d 2
+nnUNetv2_train 711 2d 3
+nnUNetv2_train 711 2d 4
+```
+
+Optional:
+
+- Add `-device cuda` for GPU training.
+
+### 5. Inference (after training)
+
+```powershell
+nnUNetv2_predict `
+  -i "path\to\imagesTs" `
+  -o "path\to\predictions" `
+  -d 711 `
+  -c 2d `
+  -f 0 1 2 3 4
+```
+
 ---
 This project and workflow were completed using Codex.
