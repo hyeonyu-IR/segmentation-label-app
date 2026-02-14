@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import subprocess
+from pathlib import Path
 import numpy as np
 import nibabel as nib
 
@@ -15,6 +16,49 @@ def _save_nifti_single_slice(image_hu, spacing, out_path):
     nib.save(img, out_path)
 
 
+def _resolve_nnunet_predict_exe():
+    # 1) explicit override
+    env_exe = os.environ.get("NNUNETV2_PREDICT_EXE", "").strip().strip('"')
+    if env_exe and os.path.isfile(env_exe):
+        return env_exe
+
+    # 2) PATH lookup
+    exe = shutil.which("nnUNetv2_predict")
+    if exe:
+        return exe
+
+    # 3) common Windows conda location fallback (user's medimg env)
+    fallback = r"C:\Users\hyeon\miniconda3\envs\medimg\Scripts\nnUNetv2_predict.exe"
+    if os.path.isfile(fallback):
+        return fallback
+
+    raise RuntimeError(
+        "nnUNetv2_predict not found. Activate the medimg environment or set "
+        "NNUNETV2_PREDICT_EXE to the full executable path."
+    )
+
+
+def _resolve_nnunet_env():
+    env = os.environ.copy()
+    # Keep existing settings if already defined.
+    raw = env.get("nnUNet_raw")
+    pre = env.get("nnUNet_preprocessed")
+    res = env.get("nnUNet_results")
+    if raw and pre and res:
+        return env
+
+    # Fallback to this workspace's standard locations.
+    root = Path(__file__).resolve().parents[2]  # .../miniconda_medimg_env
+    fallback_raw = root / "data" / "nnUNet_raw"
+    fallback_pre = root / "data" / "nnUNet_preprocessed"
+    fallback_res = root / "data" / "nnUNet_results"
+    if fallback_raw.exists() and fallback_pre.exists() and fallback_res.exists():
+        env["nnUNet_raw"] = str(fallback_raw)
+        env["nnUNet_preprocessed"] = str(fallback_pre)
+        env["nnUNet_results"] = str(fallback_res)
+    return env
+
+
 def predict_mask(
     image_hu,
     spacing,
@@ -25,12 +69,12 @@ def predict_mask(
     trainer="nnUNetTrainer",
     folds="all",
     device="cpu",
+    return_labelmap=False,
 ):
     if not use_nnunet:
         return np.zeros_like(image_hu, dtype=np.uint8)
 
-    if shutil.which("nnUNetv2_predict") is None:
-        raise RuntimeError("nnUNetv2_predict not found in PATH")
+    nnunet_predict_exe = _resolve_nnunet_predict_exe()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         input_dir = os.path.join(tmpdir, "inputs")
@@ -42,7 +86,7 @@ def predict_mask(
         _save_nifti_single_slice(image_hu, spacing, input_path)
 
         cmd = [
-            "nnUNetv2_predict",
+            nnunet_predict_exe,
             "-i",
             input_dir,
             "-o",
@@ -61,7 +105,7 @@ def predict_mask(
         if device == "cpu":
             cmd += ["-device", "cpu"]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=_resolve_nnunet_env())
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "nnUNetv2_predict failed")
 
@@ -73,5 +117,8 @@ def predict_mask(
         seg = nib.load(pred_path).get_fdata()
         seg = np.squeeze(seg).astype(np.int32)
 
+        if return_labelmap:
+            return seg.astype(np.uint8)
+
         mask = (seg == int(label_id)).astype(np.uint8)
-        return mask
+        return mask

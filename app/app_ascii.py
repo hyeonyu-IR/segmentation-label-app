@@ -4,10 +4,12 @@ import hashlib
 import csv
 import zipfile
 import re
+import traceback
 from collections import deque
 from pathlib import Path
 from datetime import datetime
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
@@ -114,6 +116,7 @@ def append_area_log_row(row_dict):
         "timestamp",
         "case_id",
         "input_type",
+        "model_assist_used",
         "original_file_name",
         "source_file",
         "slice_index_z",
@@ -216,6 +219,7 @@ def finalize_case_export():
     row_dict = build_area_log_row(
         case_name=ctx["case_name"],
         input_type=ctx["input_type"],
+        model_assist_used=ctx.get("model_assist_used", False),
         source_file_name=ctx["source_file_name"],
         volume_slice_idx=ctx["volume_slice_idx"],
         area_cm2=ctx["area_cm2"],
@@ -251,6 +255,7 @@ def compute_hu_stats(image_hu, binary_mask):
 def build_area_log_row(
     case_name,
     input_type,
+    model_assist_used,
     source_file_name,
     volume_slice_idx,
     area_cm2,
@@ -274,6 +279,7 @@ def build_area_log_row(
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "case_id": case_name,
         "input_type": input_type,
+        "model_assist_used": bool(model_assist_used),
         "original_file_name": source_file_name,
         "source_file": source_file_name,
         "slice_index_z": "" if volume_slice_idx is None else int(volume_slice_idx),
@@ -316,9 +322,121 @@ def unflip_lr_2d(arr, flipped):
     return arr
 
 
+def load_prediction_seed_slice(pred_bytes, input_type, slice_idx):
+    pred_volume, _, _ = cached_load_nifti_volume(pred_bytes)
+    arr = np.asarray(pred_volume)
+    if arr.ndim == 2:
+        return arr.astype(np.uint8)
+    if arr.ndim == 3:
+        if input_type == "NIfTI volume (.nii.gz)":
+            z = int(np.clip(slice_idx if slice_idx is not None else 0, 0, arr.shape[2] - 1))
+            return arr[:, :, z].astype(np.uint8)
+        return arr[:, :, 0].astype(np.uint8)
+    raise ValueError(f"Unsupported prediction mask shape: {arr.shape}")
+
+
 st.set_page_config(page_title="L3 Muscle Segmentation", layout="wide")
 
 st.title("L3 Skeletal Muscle Segmentation (MVP)")
+# Preserve main-page scroll position across Streamlit reruns (for smoother annotation flow).
+components.html(
+    """
+    <script>
+    (function() {
+      const KEY = "l3_seg_scroll_y";
+      const p = window.parent;
+      if (!p) return;
+      let ticking = false;
+      const save = () => {
+        const y = p.scrollY || p.document.documentElement.scrollTop || 0;
+        p.sessionStorage.setItem(KEY, String(y));
+      };
+      p.addEventListener("scroll", () => {
+        if (!ticking) {
+          p.requestAnimationFrame(() => {
+            save();
+            ticking = false;
+          });
+          ticking = true;
+        }
+      }, { passive: true });
+      const y = parseInt(p.sessionStorage.getItem(KEY) || "0", 10);
+      if (!Number.isNaN(y) && y > 0) {
+        p.requestAnimationFrame(() => p.scrollTo(0, y));
+      }
+    })();
+    </script>
+    """,
+    height=0,
+    width=0,
+)
+st.markdown(
+    """
+    <style>
+    /* Fixed-width main widgets (upload, axial slider, advanced downloads) */
+    div[data-testid="stFileUploader"] {
+        width: 760px !important;
+        max-width: 760px !important;
+    }
+    div[data-testid="stSlider"] {
+        width: 760px !important;
+        max-width: 760px !important;
+    }
+    div[data-testid="stSlider"] > div {
+        width: 760px !important;
+        max-width: 760px !important;
+    }
+    div[data-baseweb="slider"] {
+        width: 760px !important;
+        max-width: 760px !important;
+    }
+    div[data-testid="stExpander"] {
+        width: 760px !important;
+        min-width: 760px !important;
+        max-width: 760px !important;
+    }
+    div[data-testid="stExpander"] > details {
+        width: 760px !important;
+        min-width: 760px !important;
+        max-width: 760px !important;
+    }
+    /* Keep sidebar controls fully responsive inside the sidebar pane */
+    section[data-testid="stSidebar"] div[data-testid="stSlider"],
+    section[data-testid="stSidebar"] div[data-testid="stSlider"] > div,
+    section[data-testid="stSidebar"] div[data-baseweb="slider"],
+    section[data-testid="stSidebar"] div[data-testid="stFileUploader"],
+    section[data-testid="stSidebar"] div[data-testid="stExpander"],
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] > details {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+    }
+    /* Fixed-width slice navigation buttons */
+    .st-key-btn_prev_slice,
+    .st-key-btn_next_slice {
+        width: 180px !important;
+        min-width: 180px !important;
+        max-width: 180px !important;
+        flex: 0 0 180px !important;
+    }
+    .st-key-btn_prev_slice button,
+    .st-key-btn_next_slice button {
+        width: 180px !important;
+        min-width: 180px !important;
+        max-width: 180px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    .st-key-btn_prev_slice button p,
+    .st-key-btn_next_slice button p {
+        white-space: nowrap !important;
+        margin: 0 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # Persist "Last finalized" across app restarts using the CSV log.
 if "last_finalized_source_file" not in st.session_state:
@@ -334,13 +452,29 @@ rotation_deg = st.sidebar.selectbox("Rotate view", [0, 90, 180, 270], index=0)
 flip_rl = st.sidebar.checkbox("R-L flip", value=False)
 
 st.sidebar.header("Mode")
-mode = st.sidebar.radio("Segmentation mode", ["Manual annotation", "nnUNet inference"])
+mode = st.sidebar.radio(
+    "Segmentation mode",
+    ["Manual annotation", "Manual + prediction correction", "nnUNet inference"],
+)
 input_type = st.sidebar.radio("Input type", ["DICOM slice", "NIfTI volume (.nii.gz)"], index=1)
+seed_pred_uploaded = None
+if mode == "Manual + prediction correction":
+    st.sidebar.caption("Optional: load a model-predicted label map as a starting mask")
+    seed_pred_uploaded = st.sidebar.file_uploader(
+        "Prediction label map (.nii.gz)",
+        type=["nii", "gz"],
+        key="seed_pred_uploader",
+    )
+is_manual_mode = mode != "nnUNet inference"
 
 if input_type == "DICOM slice":
-    uploaded = st.file_uploader("Upload L3 axial CT DICOM (extension not required)", type=None)
+    _ul, _uc, _ur = st.columns([2, 1, 1])
+    with _ul:
+        uploaded = st.file_uploader("Upload L3 axial CT DICOM (extension not required)", type=None)
 else:
-    uploaded = st.file_uploader("Upload AMOS22 volume (.nii.gz)", type=["nii", "gz"])
+    _ul, _uc, _ur = st.columns([2, 1, 1])
+    with _ul:
+        uploaded = st.file_uploader("Upload AMOS22 volume (.nii.gz)", type=["nii", "gz"])
 
 if uploaded is not None:
     bytes_data = uploaded.getvalue()
@@ -371,22 +505,36 @@ if uploaded is not None:
         if st.session_state.get("nifti_sig") != volume_sig:
             st.session_state["nifti_sig"] = volume_sig
             st.session_state["nifti_z_idx"] = (2 * max_slice) // 3
-        st.subheader("Volume navigation")
-        nav_c1, nav_c2, nav_c3 = st.columns([1, 1, 6])
-        with nav_c1:
-            if st.button("Prev slice"):
-                st.session_state["nifti_z_idx"] = min(max_slice, int(st.session_state["nifti_z_idx"]) + 1)
-        with nav_c2:
-            if st.button("Next slice"):
-                st.session_state["nifti_z_idx"] = max(0, int(st.session_state["nifti_z_idx"]) - 1)
-        # Reverse display so 0 appears on the right end of the slider.
-        display_idx = st.slider(
-            "Axial slice index (Z) [0 on right]",
-            min_value=0,
-            max_value=max_slice,
-            value=max_slice - int(st.session_state["nifti_z_idx"]),
-        )
-        st.session_state["nifti_z_idx"] = max_slice - int(display_idx)
+            st.session_state["nifti_z_disp_idx"] = max_slice - int(st.session_state["nifti_z_idx"])
+        if "nifti_z_disp_idx" not in st.session_state:
+            st.session_state["nifti_z_disp_idx"] = max_slice - int(st.session_state.get("nifti_z_idx", max_slice // 2))
+        _nl, _nc, _nr = st.columns([2, 1, 1])
+        with _nl:
+            st.subheader("Volume navigation")
+            nav_c1, nav_c2, _ = st.columns([2, 2, 1])
+            with nav_c1:
+                if st.button("Prev slice", key="btn_prev_slice", use_container_width=False, disabled=(max_slice == 0)):
+                    new_idx = min(max_slice, int(st.session_state["nifti_z_idx"]) + 1)
+                    st.session_state["nifti_z_idx"] = new_idx
+                    st.session_state["nifti_z_disp_idx"] = max_slice - new_idx
+            with nav_c2:
+                if st.button("Next slice", key="btn_next_slice", use_container_width=False, disabled=(max_slice == 0)):
+                    new_idx = max(0, int(st.session_state["nifti_z_idx"]) - 1)
+                    st.session_state["nifti_z_idx"] = new_idx
+                    st.session_state["nifti_z_disp_idx"] = max_slice - new_idx
+            if max_slice == 0:
+                st.caption("Single-slice volume detected (Z=0).")
+                st.session_state["nifti_z_idx"] = 0
+                st.session_state["nifti_z_disp_idx"] = 0
+            else:
+                # Reverse display so 0 appears on the right end of the slider.
+                display_idx = st.slider(
+                    "Axial slice index (Z) [0 on right]",
+                    min_value=0,
+                    max_value=max_slice,
+                    key="nifti_z_disp_idx",
+                )
+                st.session_state["nifti_z_idx"] = max_slice - int(display_idx)
         volume_slice_idx = int(st.session_state["nifti_z_idx"])
         image_hu = volume_data[:, :, volume_slice_idx]
         source_id = f"NIFTI::{uploaded.name}::Z{volume_slice_idx}"
@@ -399,10 +547,12 @@ if uploaded is not None:
 
     image_u8 = window_to_uint8(image_hu, center=window_center, width=window_width)
     image_pil = Image.fromarray(image_u8).convert("L")
+    # Fixed preview width target (overridden in manual mode to follow canvas size)
+    preview_img_w = max(280, min(520, int(image_u8.shape[1] * 0.7)))
 
     mask = None
 
-    if mode == "Manual annotation":
+    if is_manual_mode:
         st.sidebar.header("Annotation")
         brush_size = st.sidebar.slider("Brush size", min_value=2, max_value=50, value=11)
         brush_alpha = st.sidebar.slider("Brush transparency", min_value=0.05, max_value=0.9, value=0.25)
@@ -425,7 +575,59 @@ if uploaded is not None:
             stroke_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {brush_alpha})"
             fill_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {brush_alpha})"
 
+        h, w = image_u8.shape
+        assist_dataset_id = "711"
+        assist_config = "2d"
+        assist_trainer = "nnUNetTrainer"
+        assist_folds = "0"
+        assist_device = "cuda"
         st.subheader("Annotation")
+        if mode == "Manual + prediction correction":
+            st.caption("Model assist: runs prediction on current displayed slice and replaces editable mask.")
+            if st.session_state.get("assist_last_error"):
+                st.error(f"Last assist error: {st.session_state.get('assist_last_error')}")
+            if st.button("Predict current slice (replace mask)"):
+                with st.spinner("Running model assist inference on current slice..."):
+                    try:
+                        st.session_state["assist_last_error"] = ""
+                        pred_label_map = predict_mask(
+                            image_hu,
+                            spacing,
+                            use_nnunet=True,
+                            label_id=1,
+                            dataset_id=str(assist_dataset_id),
+                            config=str(assist_config),
+                            trainer=str(assist_trainer),
+                            folds=str(assist_folds),
+                            device=str(assist_device),
+                            return_labelmap=True,
+                        )
+                        if pred_label_map.shape != (h, w):
+                            raise ValueError(
+                                f"Prediction shape {pred_label_map.shape} does not match image shape {(h, w)}"
+                            )
+                        pred_label_map = pred_label_map.astype(np.uint8)
+                        pred_label_map[~np.isin(pred_label_map, [0, 1, 2, 3])] = 0
+                        c1 = int(np.sum(pred_label_map == 1))
+                        c2 = int(np.sum(pred_label_map == 2))
+                        c3 = int(np.sum(pred_label_map == 3))
+                        st.session_state["assist_last_counts"] = (c1, c2, c3)
+                        st.session_state["model_assist_used"] = True
+                        st.session_state["pending_pred_label_map"] = pred_label_map
+                        if (c1 + c2 + c3) == 0:
+                            st.warning(
+                                "Model ran, but predicted an empty mask on this slice. "
+                                "Try adjusting to a nearby slice (L3) and run again."
+                            )
+                        else:
+                            st.success(
+                                f"Model prediction loaded: Psoas={c1}, Paraspinal={c2}, Abdominal_Wall={c3}"
+                            )
+                    except Exception as e:
+                        st.session_state["assist_last_error"] = f"{e}\n{traceback.format_exc()}"
+                        st.error("Model assist inference failed. See details below.")
+                        with st.expander("Assist error details", expanded=True):
+                            st.code(st.session_state["assist_last_error"])
         if input_type == "NIfTI volume (.nii.gz)":
             st.markdown(
                 f"<div style='font-weight:700; color:#f8f9fa;'>Case ID: {case_name}</div>",
@@ -447,26 +649,62 @@ if uploaded is not None:
                     unsafe_allow_html=True,
                 )
         # Downscale large images for canvas stability
-        h, w = image_u8.shape
         scale = float(canvas_max) / float(max(h, w))
         scale = min(scale, 1.5)
         disp_w = max(1, int(round(w * scale)))
         disp_h = max(1, int(round(h * scale)))
         bg_img = Image.fromarray(image_u8).convert("RGB").resize((disp_w, disp_h), Image.BILINEAR)
         st.caption(f"Canvas display size: {disp_w}x{disp_h} (scale {scale:.2f}x)")
+        # Keep preview windows visually consistent with annotation canvas scale.
+        preview_img_w = max(280, min(520, int(disp_w * 0.48)))
 
+        seed_label_map = None
+        seed_sig = "none"
+        if mode == "Manual + prediction correction" and seed_pred_uploaded is not None:
+            try:
+                seed_bytes = seed_pred_uploaded.getvalue()
+                seed_sig = hashlib.sha1(seed_bytes).hexdigest()[:16]
+                seed_label_map = load_prediction_seed_slice(seed_bytes, input_type, volume_slice_idx)
+                if seed_label_map.shape != (h, w):
+                    st.warning(
+                        f"Prediction seed shape {seed_label_map.shape} does not match current slice {(h, w)}. "
+                        "Starting from an empty mask."
+                    )
+                    seed_label_map = None
+                else:
+                    if rot_k:
+                        seed_label_map = np.rot90(seed_label_map, k=rot_k)
+                    if flip_rl:
+                        seed_label_map = np.fliplr(seed_label_map)
+                    seed_label_map = seed_label_map.astype(np.uint8)
+                    seed_label_map[~np.isin(seed_label_map, [0, 1, 2, 3])] = 0
+                    st.session_state["model_assist_used"] = True
+                    st.caption("Loaded prediction seed mask. You can now correct it with normal tools.")
+            except Exception as e:
+                st.warning(f"Could not load prediction seed mask: {e}")
+                seed_label_map = None
+
+        source_id_manual = f"{source_id}::seed::{seed_sig}"
         if (
             "label_masks" not in st.session_state
             or st.session_state.get("label_shape") != (h, w)
-            or st.session_state.get("source_id") != source_id
+            or st.session_state.get("source_id") != source_id_manual
         ):
-            st.session_state["label_masks"] = {
-                1: np.zeros((h, w), dtype=np.uint8),
-                2: np.zeros((h, w), dtype=np.uint8),
-                3: np.zeros((h, w), dtype=np.uint8),
-            }
+            if seed_label_map is None:
+                st.session_state["label_masks"] = {
+                    1: np.zeros((h, w), dtype=np.uint8),
+                    2: np.zeros((h, w), dtype=np.uint8),
+                    3: np.zeros((h, w), dtype=np.uint8),
+                }
+            else:
+                st.session_state["label_masks"] = {
+                    1: (seed_label_map == 1).astype(np.uint8),
+                    2: (seed_label_map == 2).astype(np.uint8),
+                    3: (seed_label_map == 3).astype(np.uint8),
+                }
             st.session_state["label_shape"] = (h, w)
-            st.session_state["source_id"] = source_id
+            st.session_state["source_id"] = source_id_manual
+            st.session_state["model_assist_used"] = bool(seed_label_map is not None)
             st.session_state["canvas_key"] = 0
             st.session_state["last_canvas_hash"] = None
             st.session_state["pending_draw_small_by_label"] = {
@@ -492,6 +730,34 @@ if uploaded is not None:
                 3: np.zeros((disp_h, disp_w), dtype=np.uint8),
             }
             st.session_state["pending_shape"] = (disp_h, disp_w)
+
+        pending_pred_label_map = st.session_state.pop("pending_pred_label_map", None)
+        if pending_pred_label_map is not None:
+            if pending_pred_label_map.shape == (h, w):
+                st.session_state["label_masks"] = {
+                    1: (pending_pred_label_map == 1).astype(np.uint8),
+                    2: (pending_pred_label_map == 2).astype(np.uint8),
+                    3: (pending_pred_label_map == 3).astype(np.uint8),
+                }
+                st.session_state["last_canvas_hash"] = None
+                st.session_state["canvas_key"] += 1
+                st.session_state["pending_draw_small_by_label"] = {
+                    1: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                    2: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                    3: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                }
+                st.session_state["pending_erase_small_by_label"] = {
+                    1: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                    2: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                    3: np.zeros((disp_h, disp_w), dtype=np.uint8),
+                }
+            else:
+                st.warning(
+                    f"Model assist output shape {pending_pred_label_map.shape} did not match current slice {(h, w)}."
+                )
+        if mode == "Manual + prediction correction" and st.session_state.get("assist_last_counts") is not None:
+            c1, c2, c3 = st.session_state["assist_last_counts"]
+            st.caption(f"Last assist prediction pixels: Psoas={c1}, Paraspinal={c2}, Abdominal_Wall={c3}")
 
         def _commit_pending_small_to_label_masks():
             for lid in [1, 2, 3]:
@@ -642,16 +908,25 @@ if uploaded is not None:
     overlay = overlay_mask(image_u8, mask)
 
     st.subheader("Preview")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.caption("CT slice")
-        st.image(image_pil)
-    with col2:
-        st.caption("Overlay (mask)")
-        st.image(overlay)
+    _pl, _pc, _pr = st.columns([2, 1, 1])
+    with _pl:
+        st.caption("CT slice (left) | Overlay (mask) (right)")
+        ct_rgb = image_pil.convert("RGB")
+        ov_rgb = overlay.convert("RGB")
+        w1, h1 = ct_rgb.size
+        w2, h2 = ov_rgb.size
+        # Resize both panels to a fixed width while preserving aspect ratio.
+        new_h1 = max(1, int(round(h1 * (preview_img_w / float(max(1, w1))))))
+        new_h2 = max(1, int(round(h2 * (preview_img_w / float(max(1, w2))))))
+        ct_panel = ct_rgb.resize((preview_img_w, new_h1), Image.BILINEAR)
+        ov_panel = ov_rgb.resize((preview_img_w, new_h2), Image.BILINEAR)
+        panel_h = max(ct_panel.height, ov_panel.height)
+        gap = 14
+        canvas = Image.new("RGB", (preview_img_w * 2 + gap, panel_h), (20, 20, 20))
+        canvas.paste(ct_panel, (0, (panel_h - ct_panel.height) // 2))
+        canvas.paste(ov_panel, (preview_img_w + gap, (panel_h - ov_panel.height) // 2))
+        st.image(canvas, width=preview_img_w * 2 + gap)
 
-    st.subheader("Results")
-    st.write(f"Total muscle area: {area_cm2:.2f} cm^2")
     muscle1_area = 0.0
     muscle2_area = 0.0
     muscle3_area = 0.0
@@ -663,7 +938,7 @@ if uploaded is not None:
     paraspinal_std_hu = None
     abdominal_wall_mean_hu = None
     abdominal_wall_std_hu = None
-    if mode == "Manual annotation":
+    if is_manual_mode:
         areas = []
         for lid in [1, 2, 3]:
             m = st.session_state["label_masks"].get(lid, np.zeros_like(mask))
@@ -671,49 +946,6 @@ if uploaded is not None:
         muscle1_area = float(areas[0][1])
         muscle2_area = float(areas[1][1])
         muscle3_area = float(areas[2][1])
-        st.write(f"Psoas area: {muscle1_area:.2f} cm^2")
-        st.write(f"Paraspinal area: {muscle2_area:.2f} cm^2")
-        st.write(f"Abdominal_Wall area: {muscle3_area:.2f} cm^2")
-        if show_live_hu:
-            (
-                total_mean_hu,
-                total_std_hu,
-                psoas_mean_hu,
-                psoas_std_hu,
-                paraspinal_mean_hu,
-                paraspinal_std_hu,
-                abdominal_wall_mean_hu,
-                abdominal_wall_std_hu,
-            ) = compute_hu_bundle(image_hu, st.session_state["label_masks"], mask)
-            if total_mean_hu is None:
-                st.write("Total HU: N/A")
-            else:
-                st.write(f"Total HU: mean {total_mean_hu:.2f}, std {total_std_hu:.2f}")
-            if psoas_mean_hu is None:
-                st.write("Psoas HU: N/A")
-            else:
-                st.write(f"Psoas HU: mean {psoas_mean_hu:.2f}, std {psoas_std_hu:.2f}")
-            if paraspinal_mean_hu is None:
-                st.write("Paraspinal HU: N/A")
-            else:
-                st.write(f"Paraspinal HU: mean {paraspinal_mean_hu:.2f}, std {paraspinal_std_hu:.2f}")
-            if abdominal_wall_mean_hu is None:
-                st.write("Abdominal_Wall HU: N/A")
-            else:
-                st.write(f"Abdominal_Wall HU: mean {abdominal_wall_mean_hu:.2f}, std {abdominal_wall_std_hu:.2f}")
-        else:
-            st.caption("Live HU stats disabled for speed. HU is still computed when you finalize and saved to CSV.")
-
-        st.caption(f"Area log file: {AREA_LOG_FILE}")
-        st.caption("Use the primary Finalize button in Downloads to save CSV + download pair together.")
-
-        if AREA_LOG_FILE.exists():
-            st.download_button(
-                "Download area log CSV",
-                data=AREA_LOG_FILE.read_bytes(),
-                file_name="area_log.csv",
-                mime="text/csv",
-            )
 
     st.subheader("Downloads")
     image_nifti = image_to_nifti_bytes(image_hu, spacing)
@@ -726,7 +958,7 @@ if uploaded is not None:
         volume_label_file_name = f"{case_name}-label-volume.nii.gz"
 
     pair_label_nifti = None
-    if mode == "Manual annotation":
+    if is_manual_mode:
         label_map = np.zeros_like(mask, dtype=np.uint8)
         for lid, m in st.session_state["label_masks"].items():
             label_map[m > 0] = lid
@@ -745,10 +977,11 @@ if uploaded is not None:
         "<p style='color:#c92a2a; font-weight:700;'>Primary export (image + label pair)</p>",
         unsafe_allow_html=True,
     )
-    if mode == "Manual annotation":
+    if is_manual_mode:
         st.session_state["finalize_ctx"] = {
             "case_name": case_name,
             "input_type": input_type,
+            "model_assist_used": bool(st.session_state.get("model_assist_used", False)),
             "source_file_name": source_file_name,
             "volume_slice_idx": volume_slice_idx,
             "area_cm2": area_cm2,
@@ -793,7 +1026,7 @@ if uploaded is not None:
         nifti_bytes = mask_to_nifti_bytes(mask, spacing)
         st.download_button("Mask (NIfTI)", data=nifti_bytes, file_name="mask.nii.gz", mime="application/gzip")
 
-        if mode == "Manual annotation":
+        if is_manual_mode:
             label_nifti = pair_label_nifti
             if "export_idx" not in st.session_state:
                 st.session_state["export_idx"] = 1
@@ -827,6 +1060,51 @@ if uploaded is not None:
         buf_overlay = io.BytesIO()
         overlay.save(buf_overlay, format="PNG")
         st.download_button("Overlay (PNG)", data=buf_overlay.getvalue(), file_name="overlay.png", mime="image/png")
+        if AREA_LOG_FILE.exists():
+            st.download_button(
+                "Area log CSV",
+                data=AREA_LOG_FILE.read_bytes(),
+                file_name="area_log.csv",
+                mime="text/csv",
+            )
+
+    st.subheader("Results")
+    st.write(f"Total muscle area: {area_cm2:.2f} cm^2")
+    if is_manual_mode:
+        st.write(f"Psoas area: {muscle1_area:.2f} cm^2")
+        st.write(f"Paraspinal area: {muscle2_area:.2f} cm^2")
+        st.write(f"Abdominal_Wall area: {muscle3_area:.2f} cm^2")
+        if show_live_hu:
+            (
+                total_mean_hu,
+                total_std_hu,
+                psoas_mean_hu,
+                psoas_std_hu,
+                paraspinal_mean_hu,
+                paraspinal_std_hu,
+                abdominal_wall_mean_hu,
+                abdominal_wall_std_hu,
+            ) = compute_hu_bundle(image_hu, st.session_state["label_masks"], mask)
+            if total_mean_hu is None:
+                st.write("Total HU: N/A")
+            else:
+                st.write(f"Total HU: mean {total_mean_hu:.2f}, std {total_std_hu:.2f}")
+            if psoas_mean_hu is None:
+                st.write("Psoas HU: N/A")
+            else:
+                st.write(f"Psoas HU: mean {psoas_mean_hu:.2f}, std {psoas_std_hu:.2f}")
+            if paraspinal_mean_hu is None:
+                st.write("Paraspinal HU: N/A")
+            else:
+                st.write(f"Paraspinal HU: mean {paraspinal_mean_hu:.2f}, std {paraspinal_std_hu:.2f}")
+            if abdominal_wall_mean_hu is None:
+                st.write("Abdominal_Wall HU: N/A")
+            else:
+                st.write(f"Abdominal_Wall HU: mean {abdominal_wall_mean_hu:.2f}, std {abdominal_wall_std_hu:.2f}")
+        else:
+            st.caption("Live HU stats disabled for speed. HU is still computed when you finalize and saved to CSV.")
+        st.caption(f"Area log file: {AREA_LOG_FILE}")
+        st.caption("Use the primary Finalize button in Downloads to save CSV + download pair together.")
 
     if st.session_state.get("last_finalized_source_file"):
         st.caption(
@@ -840,4 +1118,6 @@ if uploaded is not None:
                 st.caption(f"- {n}")
 
 else:
-    st.info("Upload a DICOM file to start.")
+    _il, _ic, _ir = st.columns([2, 1, 1])
+    with _il:
+        st.info("Upload a DICOM file to start.")
